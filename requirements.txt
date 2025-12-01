@@ -6,3 +6,4 @@ yfinance
 plotly
 datetime
 timedelta
+re
