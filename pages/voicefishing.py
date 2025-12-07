@@ -1,160 +1,209 @@
-import re
-from pathlib import Path
+import re                               # 정규식(regular expression) 사용: 컬럼 이름에서 '년/월/발생/건수' 같은 패턴을 찾을 때 씀
+from pathlib import Path                # 파일 경로를 운영체제에 상관없이 안전하게 다루기 위한 표준 라이브러리
 
-import streamlit as st
-import pandas as pd
-import plotly.graph_objects as go
+import streamlit as st                  # Streamlit: 파이썬 코드로 웹 대시보드를 만드는 라이브러리(UI 출력 담당)
+import pandas as pd                     # pandas: CSV를 표(DataFrame)로 읽고 전처리/계산하는 라이브러리
+import plotly.graph_objects as go       # Plotly: 인터랙티브 그래프 생성(여기서는 line chart)용
 
 # ====================== Streamlit 설정(맨 위!) ======================
-st.set_page_config(page_title="보이스피싱 대시보드", layout="wide")
-st.title("📞 보이스피싱 공공데이터 대시보드 (CSV 기반)")
+st.set_page_config(page_title="보이스피싱 대시보드", layout="wide")  # 페이지 제목/레이아웃 설정(반드시 st.* 중 가장 먼저 실행되는 게 안전)
+st.title("📞 보이스피싱 공공데이터 대시보드 (CSV 기반)")               # 앱 상단 타이틀 출력
 
 # ====================== 경로(핵심) ======================
 # 이 파일은 pages/ 안에 있으므로,
 # __file__ 기준으로 한 단계 위가 "레포 루트"가 됨.
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[1]    # 현재 파일(pages/안의 .py)의 상위 폴더(=레포 루트)를 계산해서 저장
 
 # CSV를 어디에 두든(루트 or 루트/data) 둘 다 시도해보는 후보 목록
-YEARLY_CANDIDATES = [
-    ROOT / "police_voicephishing_yearly.csv",
-    ROOT / "data" / "police_voicephishing_yearly.csv",
+YEARLY_CANDIDATES = [                         # 연도별 CSV가 있을 수 있는 위치 후보들(둘 중 하나만 있어도 됨)
+    ROOT / "police_voicephishing_yearly.csv",  # 1) 레포 루트에 CSV가 있는 경우
+    ROOT / "data" / "police_voicephishing_yearly.csv",  # 2) 레포 루트/data 폴더에 CSV가 있는 경우
 ]
-MONTHLY_CANDIDATES = [
-    ROOT / "police_voicephishing_monthly.csv",
-    ROOT / "data" / "police_voicephishing_monthly.csv",
+MONTHLY_CANDIDATES = [                        # 월별 CSV가 있을 수 있는 위치 후보들
+    ROOT / "police_voicephishing_monthly.csv", # 1) 레포 루트에 CSV가 있는 경우
+    ROOT / "data" / "police_voicephishing_monthly.csv", # 2) 레포 루트/data 폴더에 CSV가 있는 경우
 ]
 
-def pick_existing(cands: list[Path]) -> Path:
+def pick_existing(cands: list[Path]) -> Path:  # 후보 경로 리스트를 받아서 "실제로 존재하는 파일" 하나를 골라 반환하는 함수
     """후보 경로 중 실제 존재하는 파일 경로를 하나 고른다."""
-    for p in cands:
-        if p.exists():
-            return p
+    for p in cands:                            # 후보들을 하나씩 돌면서
+        if p.exists():                         # 파일이 실제로 있으면(True)
+            return p                           # 그 파일 경로(Path)를 즉시 반환
     # 어디에도 없으면 에러(파일명/위치가 다르다는 뜻)
-    raise FileNotFoundError(f"파일을 못 찾음. 후보 경로: {[str(x) for x in cands]}")
+    raise FileNotFoundError(                   # 후보들 어디에도 파일이 없으면 "파일 없음" 예외를 발생시켜 문제를 빨리 드러냄
+        f"파일을 못 찾음. 후보 경로: {[str(x) for x in cands]}"  # 어떤 경로들을 검사했는지 같이 출력(디버깅 도움)
+    )
 
-yearly_path = pick_existing(YEARLY_CANDIDATES)
-monthly_path = pick_existing(MONTHLY_CANDIDATES)
+yearly_path = pick_existing(YEARLY_CANDIDATES) # 연도별 CSV: 후보 중 실제 존재하는 경로를 선택
+monthly_path = pick_existing(MONTHLY_CANDIDATES) # 월별 CSV: 후보 중 실제 존재하는 경로를 선택
 
 # (디버그용) 실제로 어디서 읽는지 보여주기
-with st.expander("🔎 파일 경로 확인(문제 생길 때만 열어봐)"):
-    st.write("ROOT:", str(ROOT))
-    st.write("연도별 CSV:", str(yearly_path))
-    st.write("월별 CSV:", str(monthly_path))
+with st.expander("🔎 파일 경로 확인(문제 생길 때만 열어봐)"):  # 접었다 펼 수 있는 UI(평소엔 숨겨두고 필요할 때만 확인)
+    st.write("ROOT:", str(ROOT))                  # 레포 루트가 어디로 계산됐는지 화면에 출력
+    st.write("연도별 CSV:", str(yearly_path))     # 연도별 CSV의 최종 선택 경로 출력
+    st.write("월별 CSV:", str(monthly_path))      # 월별 CSV의 최종 선택 경로 출력
 
 
 # ====================== CSV 불러오기(인코딩 자동) ======================
-def read_csv_smart(path: Path) -> pd.DataFrame:
+def read_csv_smart(path: Path) -> pd.DataFrame:   # 인코딩 문제를 줄이기 위한 "자동 인코딩 시도" 함수
     # 공공데이터는 utf-8-sig / cp949가 대표적이라 이 순서가 좋음
-    for enc in ("utf-8-sig", "cp949", "euc-kr", "utf-8"):
+    for enc in ("utf-8-sig", "cp949", "euc-kr", "utf-8"):  # 흔한 인코딩 후보를 순서대로 시도
         try:
-            return pd.read_csv(path, encoding=enc)
+            return pd.read_csv(path, encoding=enc) # 해당 인코딩으로 CSV 읽기 시도(성공하면 즉시 반환)
         except Exception:
-            pass
+            pass                                   # 실패하면 다음 인코딩 후보로 넘어감
     # 최후: 깨지는 문자 무시하고 읽기
-    return pd.read_csv(path, encoding="utf-8", encoding_errors="ignore")
+    return pd.read_csv(path, encoding="utf-8", encoding_errors="ignore") # 그래도 안 되면 깨지는 문자 무시하고 강제로 로드
 
 try:
-    yearly_df = read_csv_smart(yearly_path)
-    monthly_df = read_csv_smart(monthly_path)
-except Exception as e:
-    st.error(f"CSV를 못 읽었어: {e}")
-    st.info("CSV 출처(다운로드):")
-    st.write("- 연도별: https://www.data.go.kr/data/15063815/fileData.do")
-    st.write("- 월별: https://www.data.go.kr/data/15099013/fileData.do")
-    st.stop()
+    yearly_df = read_csv_smart(yearly_path)        # 연도별 CSV를 DataFrame으로 로드(표 형태)
+    monthly_df = read_csv_smart(monthly_path)      # 월별 CSV를 DataFrame으로 로드
+except Exception as e:                             # 읽기에 실패하면
+    st.error(f"CSV를 못 읽었어: {e}")             # Streamlit 화면에 에러 메시지 출력
+    st.info("CSV 출처(다운로드):")                 # 사용자에게 참고 정보(출처) 안내
+    st.write("- 연도별: https://www.data.go.kr/data/15063815/fileData.do") # 연도별 데이터 다운로드 링크
+    st.write("- 월별: https://www.data.go.kr/data/15099013/fileData.do")  # 월별 데이터 다운로드 링크
+    st.stop()                                     # 여기서 앱 실행을 중단(아래 코드가 None/미정의 df를 쓰지 않게)
 
 # ====================== 컬럼 정리 ======================
-yearly_df.columns = yearly_df.columns.astype(str).str.strip()
-monthly_df.columns = monthly_df.columns.astype(str).str.strip()
+yearly_df.columns = yearly_df.columns.astype(str).str.strip()   # 컬럼명 앞뒤 공백 제거(공공데이터 CSV에서 자주 문제됨)
+monthly_df.columns = monthly_df.columns.astype(str).str.strip() # 월별 데이터도 동일하게 컬럼 공백 제거
 
 # ====================== 사이드바 ======================
-with st.sidebar:
-    st.header("보기")
-    view = st.radio("분석 선택", ["월별 추이(발생건수)", "연도별 비교(유형/피해액/발생)"])
+with st.sidebar:                                # 화면 왼쪽(또는 사이드)에 설정 UI를 모아둠
+    st.header("보기")                           # 사이드바 제목
+    view = st.radio(                            # 라디오 버튼: 두 화면 중 하나 선택
+        "분석 선택",
+        ["월별 추이(발생건수)", "연도별 비교(유형/피해액/발생)"]
+    )
 
 # ====================== 월별 추이 ======================
-if view == "월별 추이(발생건수)":
+if view == "월별 추이(발생건수)":                 # 사용자가 월별 추이를 선택한 경우 실행되는 분기
     # 컬럼 자동 탐색
-    year_col = next((c for c in monthly_df.columns if re.search(r"연도|년도|년", c)), None)
-    mon_col  = next((c for c in monthly_df.columns if re.search(r"월", c)), None)
-    cnt_col  = next((c for c in monthly_df.columns if ("발생" in c and "건수" in c)), None)
+    year_col = next(                             # monthly_df.columns 중에서 조건을 만족하는 첫 컬럼명을 찾음
+        (c for c in monthly_df.columns if re.search(r"연도|년도|년", c)),  # '연도/년도/년'이 들어간 컬럼을 연도 컬럼으로 판단
+        None                                     # 못 찾으면 None
+    )
+    mon_col  = next(                             # 월 컬럼 탐색
+        (c for c in monthly_df.columns if re.search(r"월", c)),            # '월'이 들어간 컬럼명 찾기
+        None
+    )
+    cnt_col  = next(                             # 발생건수 컬럼 탐색
+        (c for c in monthly_df.columns if ("발생" in c and "건수" in c)),  # '발생'과 '건수'가 동시에 들어가면 발생건수 컬럼으로 판단
+        None
+    )
 
-    if not (year_col and mon_col and cnt_col):
-        st.error(f"필수 컬럼을 못 찾음. 현재 컬럼: {list(monthly_df.columns)}")
-        st.stop()
+    if not (year_col and mon_col and cnt_col):   # 셋 중 하나라도 못 찾으면(=컬럼 구조가 예상과 다름)
+        st.error(f"필수 컬럼을 못 찾음. 현재 컬럼: {list(monthly_df.columns)}")  # 컬럼 목록을 보여줘서 무엇이 다른지 알 수 있게
+        st.stop()                                 # 더 진행하면 KeyError가 날 수 있으니 중단
 
-    df = monthly_df.copy()
+    df = monthly_df.copy()                        # 원본 monthly_df는 유지하고, 작업용 복사본을 만들어 안전하게 처리
 
     # 숫자 변환(문자/쉼표 등 방어)
-    df[year_col] = pd.to_numeric(df[year_col].astype(str).str.replace(",", "").str.strip(), errors="coerce")
-    df[mon_col]  = pd.to_numeric(df[mon_col].astype(str).str.replace(",", "").str.strip(), errors="coerce")
-    df[cnt_col]  = pd.to_numeric(df[cnt_col].astype(str).str.replace(",", "").str.strip(), errors="coerce")
-
-    # 날짜 생성 + 정렬
-    df["date"] = pd.to_datetime(
-        df[year_col].astype("Int64").astype(str) + "-" +
-        df[mon_col].astype("Int64").astype(str).str.zfill(2) + "-01",
+    df[year_col] = pd.to_numeric(                 # 연도 컬럼을 숫자로 변환
+        df[year_col].astype(str).str.replace(",", "").str.strip(),         # 쉼표/공백 제거 후
+        errors="coerce"                           # 숫자 변환 실패 값은 NaN으로 처리
+    )
+    df[mon_col]  = pd.to_numeric(                 # 월 컬럼 숫자 변환
+        df[mon_col].astype(str).str.replace(",", "").str.strip(),
         errors="coerce"
     )
-    df = df.dropna(subset=["date"]).sort_values("date")
-
-    st.subheader("📈 월별 발생건수 추이")
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=df["date"], y=df[cnt_col], mode="lines+markers", name="발생건수"))
-    fig.update_layout(xaxis_title="월", yaxis_title="발생건수", height=450)
-    st.plotly_chart(fig, use_container_width=True)
-
-    st.subheader("📄 월별 데이터(표)")
-    st.dataframe(df, use_container_width=True)
-
-# ====================== 연도별 비교 ======================
-else:
-    # 연도 컬럼 탐색 ('구분'이 연도인 경우가 흔함)
-    year_col = "구분" if "구분" in yearly_df.columns else next(
-        (c for c in yearly_df.columns if ("연도" in c or "년도" in c or str(c).endswith("년"))),
-        yearly_df.columns[0]
+    df[cnt_col]  = pd.to_numeric(                 # 발생건수 숫자 변환
+        df[cnt_col].astype(str).str.replace(",", "").str.strip(),
+        errors="coerce"
     )
 
-    df = yearly_df.copy()
+    # 날짜 생성 + 정렬
+    df["date"] = pd.to_datetime(                  # 'YYYY-MM-01' 형태로 날짜를 만들어 시계열 그래프 x축으로 사용
+        df[year_col].astype("Int64").astype(str) + "-" +                   # 연도(정수형) → 문자열
+        df[mon_col].astype("Int64").astype(str).str.zfill(2) + "-01",      # 월 → 2자리(01~12)로 맞춤 후 '-01' 붙임
+        errors="coerce"                           # 변환 실패는 NaT(날짜 결측)로 처리
+    )
+    df = df.dropna(subset=["date"]).sort_values("date") # 날짜가 없는 행은 제거하고(date가 NaT), 시간순으로 정렬
+
+    st.subheader("📈 월별 발생건수 추이")          # 섹션 제목 출력
+    fig = go.Figure()                             # Plotly Figure 객체(그래프 캔버스) 생성
+    fig.add_trace(go.Scatter(                     # 선 그래프(Scatter) 추가
+        x=df["date"],                             # x축: 날짜
+        y=df[cnt_col],                            # y축: 발생건수
+        mode="lines+markers",                     # 선 + 점(마커) 함께 표시
+        name="발생건수"                           # 범례(legend) 이름
+    ))
+    fig.update_layout(                            # 그래프 레이아웃(축 제목/높이 등) 설정
+        xaxis_title="월",
+        yaxis_title="발생건수",
+        height=450
+    )
+    st.plotly_chart(fig, use_container_width=True) # Streamlit에 Plotly 그래프 출력(가로폭 꽉 차게)
+
+    st.subheader("📄 월별 데이터(표)")             # 데이터 표 섹션 제목
+    st.dataframe(df, use_container_width=True)     # 전처리/정렬된 데이터프레임을 화면에 표로 보여줌
+
+# ====================== 연도별 비교 ======================
+else:                                             # 사용자가 연도별 비교를 선택한 경우 실행되는 분기
+    # 연도 컬럼 탐색 ('구분'이 연도인 경우가 흔함)
+    year_col = "구분" if "구분" in yearly_df.columns else next(  # '구분' 컬럼이 있으면 그걸 연도 컬럼으로 우선 사용
+        (c for c in yearly_df.columns if ("연도" in c or "년도" in c or str(c).endswith("년"))),  # 아니면 '연도/년도/..년'으로 끝나는 컬럼 찾기
+        yearly_df.columns[0]                       # 그래도 없으면 첫 컬럼을 연도로 가정(최후의 대비)
+    )
+
+    df = yearly_df.copy()                          # 원본 yearly_df 보호를 위해 복사본 사용
 
     # 연도 숫자화 + 정렬
-    df[year_col] = pd.to_numeric(df[year_col].astype(str).str.replace(",", "").str.strip(), errors="coerce")
-    df = df.dropna(subset=[year_col]).sort_values(year_col)
+    df[year_col] = pd.to_numeric(                  # 연도 컬럼을 숫자로 변환(문자/쉼표/공백 방어)
+        df[year_col].astype(str).str.replace(",", "").str.strip(),
+        errors="coerce"
+    )
+    df = df.dropna(subset=[year_col]).sort_values(year_col)  # 연도 값 없는 행 제거 + 연도 오름차순 정렬
 
     # 유형별 피해액/발생건수 컬럼 찾기
-    damage_cols = [c for c in df.columns if ("피해액" in c and ("억원" in c or "원" in c))]
-    case_cols   = [c for c in df.columns if ("발생" in c and "건수" in c)]
+    damage_cols = [c for c in df.columns if ("피해액" in c and ("억원" in c or "원" in c))] # '피해액'이 포함되고 단위(억원/원)가 있는 컬럼을 피해액 후보로 수집
+    case_cols   = [c for c in df.columns if ("발생" in c and "건수" in c)]                 # '발생'+'건수'가 들어간 컬럼을 발생건수 후보로 수집
 
-    st.subheader("📊 연도별 데이터(표)")
-    st.dataframe(df, use_container_width=True)
+    st.subheader("📊 연도별 데이터(표)")            # 연도별 데이터 표 섹션 제목
+    st.dataframe(df, use_container_width=True)      # 정렬된 연도별 데이터를 표로 출력
 
-    if damage_cols:
-        st.subheader("📈 연도별 피해액 추이(유형별)")
-        fig = go.Figure()
-        for c in damage_cols:
-            fig.add_trace(go.Scatter(
-                x=df[year_col],
-                y=pd.to_numeric(df[c].astype(str).str.replace(",", "").str.strip(), errors="coerce"),
-                mode="lines+markers",
-                name=c
+    if damage_cols:                                 # 피해액 컬럼이 하나라도 있으면
+        st.subheader("📈 연도별 피해액 추이(유형별)") # 피해액 그래프 섹션 제목
+        fig = go.Figure()                            # Plotly Figure 생성
+        for c in damage_cols:                        # 피해액 컬럼(유형별) 각각에 대해
+            fig.add_trace(go.Scatter(                # 선 그래프 하나씩 추가(여러 선 = 유형 비교)
+                x=df[year_col],                      # x축: 연도
+                y=pd.to_numeric(                     # y축: 해당 피해액 컬럼의 숫자값
+                    df[c].astype(str).str.replace(",", "").str.strip(),
+                    errors="coerce"
+                ),
+                mode="lines+markers",                # 선 + 마커
+                name=c                               # 범례에 컬럼명 표시(유형 구분용)
             ))
-        fig.update_layout(xaxis_title="연도", yaxis_title="피해액", height=450)
-        st.plotly_chart(fig, use_container_width=True)
+        fig.update_layout(                           # 레이아웃 설정
+            xaxis_title="연도",
+            yaxis_title="피해액",
+            height=450
+        )
+        st.plotly_chart(fig, use_container_width=True) # 그래프 출력
     else:
-        st.info("피해액 컬럼을 못 찾았어(컬럼명이 바뀌었을 수 있음).")
+        st.info("피해액 컬럼을 못 찾았어(컬럼명이 바뀌었을 수 있음).") # 피해액 컬럼이 없으면 안내 메시지 출력
 
-    if case_cols:
-        st.subheader("📈 연도별 발생건수 추이(유형별)")
-        fig = go.Figure()
-        for c in case_cols:
-            fig.add_trace(go.Scatter(
-                x=df[year_col],
-                y=pd.to_numeric(df[c].astype(str).str.replace(",", "").str.strip(), errors="coerce"),
-                mode="lines+markers",
-                name=c
+    if case_cols:                                    # 발생건수 컬럼이 있으면
+        st.subheader("📈 연도별 발생건수 추이(유형별)") # 발생건수 그래프 섹션 제목
+        fig = go.Figure()                            # Plotly Figure 생성
+        for c in case_cols:                          # 발생건수 컬럼(유형별) 각각에 대해
+            fig.add_trace(go.Scatter(                # 선 그래프 추가
+                x=df[year_col],                      # x축: 연도
+                y=pd.to_numeric(                     # y축: 발생건수(숫자)
+                    df[c].astype(str).str.replace(",", "").str.strip(),
+                    errors="coerce"
+                ),
+                mode="lines+markers",                # 선 + 마커
+                name=c                               # 범례: 컬럼명(유형명 역할)
             ))
-        fig.update_layout(xaxis_title="연도", yaxis_title="발생건수", height=450)
-        st.plotly_chart(fig, use_container_width=True)
+        fig.update_layout(                           # 레이아웃 설정
+            xaxis_title="연도",
+            yaxis_title="발생건수",
+            height=450
+        )
+        st.plotly_chart(fig, use_container_width=True) # 그래프 출력
 
-st.divider()
-st.caption("데이터 출처(공식 CSV): 공공데이터포털(경찰청) 보이스피싱 현황/월별 현황")
+st.divider()                                         # 페이지 구분선(시각적으로 구분)
+st.caption("데이터 출처(공식 CSV): 공공데이터포털(경찰청) 보이스피싱 현황/월별 현황")  # 출처 문구(보고서/앱 신뢰성용)
