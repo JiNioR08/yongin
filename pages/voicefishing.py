@@ -158,14 +158,13 @@ with st.sidebar:
 
 
 # ----------------------------
-# 5) 월별(기간 선택) 화면
+# 5) 월별(기간 선택) 화면 (✅ 막대그래프 제거, 라인만)
 # ----------------------------
 if view == "월별(기간 선택)":
     min_d, max_d = mdf["date"].min().date(), mdf["date"].max().date()
     with st.sidebar:
         start = st.date_input("시작", value=min_d, min_value=min_d, max_value=max_d)
         end = st.date_input("끝", value=max_d, min_value=min_d, max_value=max_d)
-        chart = st.radio("차트", ["라인", "막대"], horizontal=True)
 
     if pd.to_datetime(start) > pd.to_datetime(end):
         st.error("시작 날짜가 끝 날짜보다 늦어.")
@@ -185,16 +184,11 @@ if view == "월별(기간 선택)":
     c.metric("개월 수", f"{len(fdf):,}")
 
     fig, ax = plt.subplots(figsize=(10, 4.6))
-    if chart == "라인":
-        ax.plot(fdf["date"], fdf["count"], marker="o", linewidth=2)
-        fig.autofmt_xdate()
-    else:
-        ax.bar(fdf["date"].dt.strftime("%Y-%m"), fdf["count"])
-        plt.xticks(rotation=45, ha="right")
-
+    ax.plot(fdf["date"], fdf["count"], marker="o", linewidth=2)
     ax.set_xlabel("월")
     ax.set_ylabel("발생건수")
     ax.grid(True, alpha=0.3)
+    fig.autofmt_xdate()
     st.pyplot(fig, use_container_width=True, clear_figure=True)
 
     st.subheader("📄 필터된 월별 데이터")
@@ -202,7 +196,7 @@ if view == "월별(기간 선택)":
 
 
 # ----------------------------
-# 6) 연도별(기간 선택) 화면
+# 6) 연도별(기간 선택) 화면 (그대로)
 # ----------------------------
 else:
     min_y, max_y = int(ydf["year"].min()), int(ydf["year"].max())
