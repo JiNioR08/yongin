@@ -9,10 +9,10 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 
-# ----------------------------
-# 0) Streamlit 기본 설정
-# ----------------------------
-st.set_page_config(page_title="보이스피싱", layout="wide")
+# ✅ pages 파일에서는 set_page_config() 금지/권장X
+# (main.py에서만 1번, 그리고 st.* 중 가장 먼저 실행)
+
+
 st.title("📞 보이스피싱 대시보드 (Red-Black Tree로 기간 검색)")
 
 
@@ -27,6 +27,7 @@ def pick(*cands: str) -> Path:
             return p
     raise FileNotFoundError(f"CSV를 못 찾음: {cands}")
 
+
 def read_csv_smart(path: Path) -> pd.DataFrame:
     """공공데이터 CSV 인코딩(utf-8-sig/cp949/euc-kr 등) 자동 시도해서 읽는다."""
     for enc in ("utf-8-sig", "cp949", "euc-kr", "utf-8"):
@@ -36,12 +37,14 @@ def read_csv_smart(path: Path) -> pd.DataFrame:
             pass
     return pd.read_csv(path, encoding="utf-8", encoding_errors="ignore")
 
+
 def num(s: pd.Series) -> pd.Series:
     """콤마/공백 제거 후 숫자로 변환(실패는 NaN)."""
     return pd.to_numeric(
         s.astype(str).str.replace(",", "", regex=False).str.strip(),
         errors="coerce",
     )
+
 
 monthly_path = pick(
     "police_voicephishing_monthly.csv",
@@ -92,6 +95,7 @@ def prepare_monthly(df: pd.DataFrame) -> pd.DataFrame:
     out["count"] = out["count"].fillna(0).astype(float)
     return out.reset_index(drop=True)
 
+
 def prepare_yearly(df: pd.DataFrame) -> pd.DataFrame:
     """연도별 CSV에서 year(정수)를 만들고 연도순으로 정렬한다."""
     year_col = "구분" if "구분" in df.columns else next(
@@ -105,6 +109,7 @@ def prepare_yearly(df: pd.DataFrame) -> pd.DataFrame:
     d = d.sort_values("year").reset_index(drop=True)
     return d
 
+
 mdf = prepare_monthly(mraw)
 ydf = prepare_yearly(yraw)
 
@@ -115,14 +120,16 @@ ydf = prepare_yearly(yraw)
 RED = 1
 BLACK = 0
 
+
 @dataclass
 class RBNode:
     k: Any
     v: Any
     color: int = RED
-    left: "RBNode|None" = None
-    right: "RBNode|None" = None
-    parent: "RBNode|None" = None
+    left: Optional["RBNode"] = None
+    right: Optional["RBNode"] = None
+    parent: Optional["RBNode"] = None
+
 
 class RBTree:
     def __init__(self):
@@ -271,19 +278,19 @@ class RBTree:
 
 @st.cache_resource(show_spinner=False)
 def build_month_tree(df: pd.DataFrame) -> RBTree:
-    """월별 date->count를 RBT에 넣어 트리를 만든다(캐시됨)."""
     t = RBTree()
     for k, v in zip(df["date"].tolist(), df["count"].tolist()):
         t.insert(k, float(v))
     return t
 
+
 @st.cache_resource(show_spinner=False)
 def build_year_tree(df: pd.DataFrame) -> RBTree:
-    """연도 year->row(dict)를 RBT에 넣어 트리를 만든다(캐시됨)."""
     t = RBTree()
     for y, row in zip(df["year"].tolist(), df.to_dict("records")):
         t.insert(int(y), row)
     return t
+
 
 mtree = build_month_tree(mdf)
 ytree = build_year_tree(ydf)
@@ -341,7 +348,6 @@ if view == "월별(기간 선택)":
 else:
     min_y, max_y = int(ydf["year"].min()), int(ydf["year"].max())
 
-    # 숫자형 지표 컬럼 자동 추출
     candidates: List[str] = []
     for c in ydf.columns:
         if c in ("year",):
