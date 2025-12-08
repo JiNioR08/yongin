@@ -1,49 +1,31 @@
-# [1] 라이브러리 불러오기: 정규식/경로/Streamlit UI/pandas/Plotly
+# pages/voicefishing.py
 import re
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
 import streamlit as st
 import pandas as pd
-import plotly.graph_objects as go
+import matplotlib.pyplot as plt
 
-# [2] Streamlit 페이지 설정: 반드시 st.* 중 가장 먼저 실행되는 게 안전
-st.set_page_config(page_title="보이스피싱 대시보드", layout="wide")
-st.title("📞 보이스피싱 공공데이터 대시보드 (CSV 기반)")
 
-# [3] 경로 처리 핵심:
-# pages/ 안에서 실행되므로, 현재 파일 기준으로 한 단계 위(레포 루트)를 ROOT로 잡는다.
-ROOT = Path(__file__).resolve().parents[1]
+# ----------------------------
+# 0) Streamlit 기본 설정
+# ----------------------------
+st.set_page_config(page_title="보이스피싱", layout="wide")
+st.title("📞 보이스피싱 대시보드 (BST로 기간 검색)")
 
-# [4] CSV가 루트에 있거나 루트/data에 있을 수 있어서 후보를 두고 "존재하는 것"을 선택한다.
-YEARLY_CANDIDATES = [
-    ROOT / "police_voicephishing_yearly.csv",
-    ROOT / "data" / "police_voicephishing_yearly.csv",
-]
-MONTHLY_CANDIDATES = [
-    ROOT / "police_voicephishing_monthly.csv",
-    ROOT / "data" / "police_voicephishing_monthly.csv",
-]
 
-# [5] 후보 중 실제 존재하는 파일 경로를 찾아서 반환한다. 없으면 FileNotFoundError.
-def pick_existing(cands: list[Path]) -> Path:
-    """후보 경로 중 실제 존재하는 파일 경로를 하나 고른다."""
-    for p in cands:
+# ----------------------------
+# 1) 파일 로드 (현재 작업폴더가 루트든 pages든 둘 다 대응)
+# ----------------------------
+def pick(*cands: str) -> Path:
+    for s in cands:
+        p = Path(s)
         if p.exists():
             return p
-    raise FileNotFoundError(f"파일을 못 찾음. 후보 경로: {[str(x) for x in cands]}")
+    raise FileNotFoundError(f"CSV를 못 찾음: {cands}")
 
-# [6] 실제 사용할 CSV 경로 결정
-yearly_path = pick_existing(YEARLY_CANDIDATES)
-monthly_path = pick_existing(MONTHLY_CANDIDATES)
-
-# [7] 디버그용: 현재 루트/선택된 파일 경로를 접이식으로 보여준다.
-with st.expander("🔎 파일 경로 확인(문제 생길 때만 열어봐)"):
-    st.write("ROOT:", str(ROOT))
-    st.write("연도별 CSV:", str(yearly_path))
-    st.write("월별 CSV:", str(monthly_path))
-
-# [8] CSV 로딩(인코딩 자동 시도):
-# 공공데이터는 utf-8-sig/cp949/euc-kr이 섞여서 인코딩을 순서대로 시도한다.
 def read_csv_smart(path: Path) -> pd.DataFrame:
     for enc in ("utf-8-sig", "cp949", "euc-kr", "utf-8"):
         try:
@@ -52,70 +34,231 @@ def read_csv_smart(path: Path) -> pd.DataFrame:
             pass
     return pd.read_csv(path, encoding="utf-8", encoding_errors="ignore")
 
-# [9] CSV 로딩 실패 시 사용자에게 안내하고 앱을 중단한다.
-try:
-    yearly_df = read_csv_smart(yearly_path)
-    monthly_df = read_csv_smart(monthly_path)
-except Exception as e:
-    st.error(f"CSV를 못 읽었어: {e}")
-    st.info("CSV 출처(다운로드):")
-    st.write("- 연도별: https://www.data.go.kr/data/15063815/fileData.do")
-    st.write("- 월별: https://www.data.go.kr/data/15099013/fileData.do")
-    st.stop()
+def num(s: pd.Series) -> pd.Series:
+    return pd.to_numeric(
+        s.astype(str).str.replace(",", "", regex=False).str.strip(),
+        errors="coerce",
+    )
 
-# [10] 컬럼명 공백 제거: 공공데이터 CSV는 컬럼명 앞뒤 공백 때문에 오류가 나는 경우가 많다.
-yearly_df.columns = yearly_df.columns.astype(str).str.strip()
-monthly_df.columns = monthly_df.columns.astype(str).str.strip()
+# 루트에서 실행하든 pages에서 실행하든 찾도록 후보 여러 개
+monthly_path = pick(
+    "police_voicephishing_monthly.csv",
+    "../police_voicephishing_monthly.csv",
+    "data/police_voicephishing_monthly.csv",
+    "../data/police_voicephishing_monthly.csv",
+)
+yearly_path = pick(
+    "police_voicephishing_yearly.csv",
+    "../police_voicephishing_yearly.csv",
+    "data/police_voicephishing_yearly.csv",
+    "../data/police_voicephishing_yearly.csv",
+)
 
-# [11] 사이드바: 월별/연도별 분석 화면 선택
+with st.expander("🔎 파일 경로 확인"):
+    st.write("월별 CSV:", str(monthly_path))
+    st.write("연도별 CSV:", str(yearly_path))
+
+mraw = read_csv_smart(monthly_path)
+yraw = read_csv_smart(yearly_path)
+mraw.columns = mraw.columns.astype(str).str.strip()
+yraw.columns = yraw.columns.astype(str).str.strip()
+
+
+# ----------------------------
+# 2) 월별/연도별 전처리
+# ----------------------------
+def prepare_monthly(df: pd.DataFrame) -> pd.DataFrame:
+    ycol = next((c for c in df.columns if re.search(r"연도|년도|년", c)), None)
+    mcol = next((c for c in df.columns if re.search(r"월", c)), None)
+    ccol = next((c for c in df.columns if ("발생" in c and "건수" in c)), None)
+    if not (ycol and mcol and ccol):
+        raise ValueError(f"월별 CSV 컬럼 인식 실패: {list(df.columns)}")
+
+    d = df.copy()
+    d[ycol], d[mcol], d[ccol] = num(d[ycol]), num(d[mcol]), num(d[ccol])
+
+    d["date"] = pd.to_datetime(
+        d[ycol].astype("Int64").astype(str)
+        + "-"
+        + d[mcol].astype("Int64").astype(str).str.zfill(2)
+        + "-01",
+        errors="coerce",
+    )
+    d = d.dropna(subset=["date"]).sort_values("date")
+    out = d[["date", ccol]].rename(columns={ccol: "count"}).copy()
+    out["count"] = out["count"].fillna(0).astype(float)
+    return out.reset_index(drop=True)
+
+def prepare_yearly(df: pd.DataFrame) -> pd.DataFrame:
+    year_col = "구분" if "구분" in df.columns else next(
+        (c for c in df.columns if ("연도" in c or "년도" in c or str(c).endswith("년"))),
+        df.columns[0],
+    )
+    d = df.copy()
+    d["year"] = num(d[year_col])
+    d = d.dropna(subset=["year"]).copy()
+    d["year"] = d["year"].astype(int)
+    d = d.sort_values("year").reset_index(drop=True)
+    return d
+
+mdf = prepare_monthly(mraw)
+ydf = prepare_yearly(yraw)
+
+
+# ----------------------------
+# 3) BST 구현 (기간 범위 검색용)
+# ----------------------------
+@dataclass
+class Node:
+    k: Any
+    v: Any
+    l: Optional["Node"] = None
+    r: Optional["Node"] = None
+    mn: Any = None
+    mx: Any = None
+
+def build(items: List[Tuple[Any, Any]]) -> Optional[Node]:
+    """정렬된 (key, value) 리스트로 균형에 가까운 BST 생성"""
+    if not items:
+        return None
+    mid = len(items) // 2
+    k, v = items[mid]
+    n = Node(k, v, build(items[:mid]), build(items[mid + 1 :]))
+
+    mins = [n.k]
+    maxs = [n.k]
+    if n.l:
+        mins.append(n.l.mn); maxs.append(n.l.mx)
+    if n.r:
+        mins.append(n.r.mn); maxs.append(n.r.mx)
+    n.mn = min(mins)
+    n.mx = max(maxs)
+    return n
+
+def collect(n: Optional[Node], lo: Any, hi: Any, out: List[Tuple[Any, Any]]) -> None:
+    """[lo, hi] 범위에 들어오는 노드만 inorder 순서로 수집"""
+    if (not n) or (n.mx < lo) or (n.mn > hi):
+        return  # 서브트리 전체가 범위 밖이면 스킵
+    collect(n.l, lo, hi, out)
+    if lo <= n.k <= hi:
+        out.append((n.k, n.v))
+    collect(n.r, lo, hi, out)
+
+# 월별 트리: key = date, value = count
+mtree = build(list(zip(mdf["date"].tolist(), mdf["count"].tolist())))
+# 연도별 트리: key = year, value = 해당 행(dict)
+ytree = build(list(zip(ydf["year"].tolist(), ydf.to_dict("records"))))
+
+
+# ----------------------------
+# 4) UI 공통
+# ----------------------------
 with st.sidebar:
-    st.header("보기")
-    view = st.radio("분석 선택", ["월별 추이(발생건수)", "연도별 비교(유형/피해액/발생)"])
+    view = st.radio("보기", ["월별(기간 선택)", "연도별(기간 선택)"])
 
-# [12] 월별 화면:
-# - 연/월/발생건수 컬럼을 자동 탐색
-# - 연+월로 date를 만들고 정렬해서 시계열 라인차트를 그린다.
-if view == "월별 추이(발생건수)":
-    year_col = next((c for c in monthly_df.columns if re.search(r"연도|년도|년", c)), None)
-    mon_col  = next((c for c in monthly_df.columns if re.search(r"월", c)), None)
-    cnt_col  = next((c for c in monthly_df.columns if ("발생" in c and "건수" in c)), None)
 
-    if not (year_col and mon_col and cnt_col):
-        st.error(f"필수 컬럼을 못 찾음. 현재 컬럼: {list(monthly_df.columns)}")
+# ----------------------------
+# 5) 월별(기간 선택) 화면
+# ----------------------------
+if view == "월별(기간 선택)":
+    min_d, max_d = mdf["date"].min().date(), mdf["date"].max().date()
+    with st.sidebar:
+        start = st.date_input("시작", value=min_d, min_value=min_d, max_value=max_d)
+        end = st.date_input("끝", value=max_d, min_value=min_d, max_value=max_d)
+        chart = st.radio("차트", ["라인", "막대"], horizontal=True)
+
+    if pd.to_datetime(start) > pd.to_datetime(end):
+        st.error("시작 날짜가 끝 날짜보다 늦어.")
         st.stop()
 
-    df = monthly_df.copy()
+    out: List[Tuple[pd.Timestamp, float]] = []
+    collect(mtree, pd.to_datetime(start), pd.to_datetime(end), out)
+    if not out:
+        st.warning("해당 기간 데이터가 없어.")
+        st.stop()
 
-    df[year_col] = pd.to_numeric(df[year_col].astype(str).str.replace(",", "").str.strip(), errors="coerce")
-    df[mon_col]  = pd.to_numeric(df[mon_col].astype(str).str.replace(",", "").str.strip(), errors="coerce")
-    df[cnt_col]  = pd.to_numeric(df[cnt_col].astype(str).str.replace(",", "").str.strip(), errors="coerce")
+    fdf = pd.DataFrame(out, columns=["date", "count"]).sort_values("date")
 
-    df["date"] = pd.to_datetime(
-        df[year_col].astype("Int64").astype(str) + "-" +
-        df[mon_col].astype("Int64").astype(str).str.zfill(2) + "-01",
-        errors="coerce"
-    )
-    df = df.dropna(subset=["date"]).sort_values("date")
+    a, b, c = st.columns(3)
+    a.metric("총합", f"{int(fdf['count'].sum()):,}")
+    b.metric("평균", f"{fdf['count'].mean():,.1f}")
+    c.metric("개월 수", f"{len(fdf):,}")
 
-    st.subheader("📈 월별 발생건수 추이")
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=df["date"], y=df[cnt_col], mode="lines+markers", name="발생건수"))
-    fig.update_layout(xaxis_title="월", yaxis_title="발생건수", height=450)
-    st.plotly_chart(fig, use_container_width=True)
+    fig, ax = plt.subplots(figsize=(10, 4.6))
+    if chart == "라인":
+        ax.plot(fdf["date"], fdf["count"], marker="o", linewidth=2)
+        fig.autofmt_xdate()
+    else:
+        ax.bar(fdf["date"].dt.strftime("%Y-%m"), fdf["count"])
+        plt.xticks(rotation=45, ha="right")
 
-    st.subheader("📄 월별 데이터(표)")
-    st.dataframe(df, use_container_width=True)
+    ax.set_xlabel("월")
+    ax.set_ylabel("발생건수")
+    ax.grid(True, alpha=0.3)
+    st.pyplot(fig, use_container_width=True, clear_figure=True)
 
-# [13] 연도별 화면:
-# - 연도 컬럼(구분/연도)을 잡고 정렬
-# - 피해액/발생건수 관련 컬럼들을 찾아 유형별로 여러 선 그래프를 그린다.
+    st.subheader("📄 필터된 월별 데이터")
+    st.dataframe(fdf, use_container_width=True)
+
+
+# ----------------------------
+# 6) 연도별(기간 선택) 화면
+# ----------------------------
 else:
-    year_col = "구분" if "구분" in yearly_df.columns else next(
-        (c for c in yearly_df.columns if ("연도" in c or "년도" in c or str(c).endswith("년"))),
-        yearly_df.columns[0]
-    )
+    min_y, max_y = int(ydf["year"].min()), int(ydf["year"].max())
 
-    df = yearly_df.copy()
+    # 숫자형 지표 컬럼 자동 추출
+    candidates: List[str] = []
+    for c in ydf.columns:
+        if c in ("year",):  # 내부 컬럼 제외
+            continue
+        s = num(ydf[c])
+        if s.notna().mean() >= 0.4:
+            candidates.append(c)
 
-    df[year_col] = pd.to_numeric(df[year_col].astype(str).str.replace(",", "").str.strip(), errors="coerce")
-    df = df.dropna(subset=[year_col]).sort_values(year_col)
+    if not candidates:
+        st.error("연도별 CSV에서 숫자형 지표 컬럼을 찾지 못했어.")
+        st.write("현재 컬럼:", list(ydf.columns))
+        st.stop()
+
+    with st.sidebar:
+        yr_lo, yr_hi = st.slider("연도 범위", min_y, max_y, (min_y, max_y))
+        chosen = st.multiselect(
+            "그릴 지표(여러 개 가능)",
+            options=candidates,
+            default=candidates[:2] if len(candidates) >= 2 else candidates[:1],
+        )
+
+    if not chosen:
+        st.info("사이드바에서 지표를 최소 1개 선택해줘.")
+        st.stop()
+
+    out: List[Tuple[int, Dict[str, Any]]] = []
+    collect(ytree, yr_lo, yr_hi, out)
+    if not out:
+        st.warning("해당 연도 범위 데이터가 없어.")
+        st.stop()
+
+    rows = [r for _, r in sorted(out, key=lambda x: x[0])]
+    tdf = pd.DataFrame(rows)
+    # 연도 컬럼 보정
+    tdf["year"] = pd.to_numeric(tdf.get("year", tdf.get("구분")), errors="coerce").astype("Int64")
+
+    # 선택된 컬럼 숫자화
+    for c in chosen:
+        tdf[c] = num(tdf[c])
+
+    st.subheader(f"📊 연도별 비교: {yr_lo} ~ {yr_hi}")
+    fig, ax = plt.subplots(figsize=(10, 4.6))
+    for c in chosen:
+        ax.plot(tdf["year"], tdf[c], marker="o", linewidth=2, label=c)
+
+    ax.set_xlabel("연도")
+    ax.set_ylabel("값")
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="best")
+    ax.set_xticks(sorted(tdf["year"].dropna().astype(int).unique()))
+    st.pyplot(fig, use_container_width=True, clear_figure=True)
+
+    st.subheader("📄 필터된 연도별 데이터")
+    st.dataframe(tdf[["year"] + chosen], use_container_width=True)
