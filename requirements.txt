@@ -6,4 +6,4 @@ yfinance
 plotly
 datetime
 timedelta
-
+matplotlib
