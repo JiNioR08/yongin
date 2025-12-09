@@ -1,4 +1,3 @@
-# pages/voicefishing.py
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,22 +8,31 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 
-# ----------------------------
-# 0) Streamlit 기본 설정
-# ----------------------------
-st.set_page_config(page_title="보이스피싱", layout="wide")
-st.title("📞 보이스피싱 대시보드 (BST로 기간 검색)")
+# ✅ pages에서는 set_page_config() 쓰지 말 것
+st.title("📞 보이스피싱 대시보드 (Red-Black Tree 기간 검색)")
 
 
 # ----------------------------
-# 1) 파일 로드 (현재 작업폴더가 루트든 pages든 둘 다 대응)
+# A) CSV 로딩 유틸
 # ----------------------------
-def pick(*cands: str) -> Path:
-    for s in cands:
-        p = Path(s)
+ROOT = Path(__file__).resolve().parents[1]  # 레포 루트(= main.py 있는 곳)
+
+MONTHLY_CANDS = [
+    ROOT / "police_voicephishing_monthly.csv",
+    ROOT / "data" / "police_voicephishing_monthly.csv",
+]
+YEARLY_CANDS = [
+    ROOT / "police_voicephishing_yearly.csv",
+    ROOT / "data" / "police_voicephishing_yearly.csv",
+]
+
+
+def pick_existing(cands: List[Path]) -> Path:
+    for p in cands:
         if p.exists():
             return p
-    raise FileNotFoundError(f"CSV를 못 찾음: {cands}")
+    raise FileNotFoundError(f"CSV를 못 찾음: {[str(x) for x in cands]}")
+
 
 def read_csv_smart(path: Path) -> pd.DataFrame:
     for enc in ("utf-8-sig", "cp949", "euc-kr", "utf-8"):
@@ -34,27 +42,19 @@ def read_csv_smart(path: Path) -> pd.DataFrame:
             pass
     return pd.read_csv(path, encoding="utf-8", encoding_errors="ignore")
 
+
 def num(s: pd.Series) -> pd.Series:
     return pd.to_numeric(
         s.astype(str).str.replace(",", "", regex=False).str.strip(),
         errors="coerce",
     )
 
-# 루트에서 실행하든 pages에서 실행하든 찾도록 후보 여러 개
-monthly_path = pick(
-    "police_voicephishing_monthly.csv",
-    "../police_voicephishing_monthly.csv",
-    "data/police_voicephishing_monthly.csv",
-    "../data/police_voicephishing_monthly.csv",
-)
-yearly_path = pick(
-    "police_voicephishing_yearly.csv",
-    "../police_voicephishing_yearly.csv",
-    "data/police_voicephishing_yearly.csv",
-    "../data/police_voicephishing_yearly.csv",
-)
+
+monthly_path = pick_existing(MONTHLY_CANDS)
+yearly_path = pick_existing(YEARLY_CANDS)
 
 with st.expander("🔎 파일 경로 확인"):
+    st.write("ROOT:", str(ROOT))
     st.write("월별 CSV:", str(monthly_path))
     st.write("연도별 CSV:", str(yearly_path))
 
@@ -64,15 +64,12 @@ mraw.columns = mraw.columns.astype(str).str.strip()
 yraw.columns = yraw.columns.astype(str).str.strip()
 
 
-# ----------------------------
-# 2) 월별/연도별 전처리
-# ----------------------------
 def prepare_monthly(df: pd.DataFrame) -> pd.DataFrame:
     ycol = next((c for c in df.columns if re.search(r"연도|년도|년", c)), None)
     mcol = next((c for c in df.columns if re.search(r"월", c)), None)
     ccol = next((c for c in df.columns if ("발생" in c and "건수" in c)), None)
     if not (ycol and mcol and ccol):
-        raise ValueError(f"월별 CSV 컬럼 인식 실패: {list(df.columns)}")
+        raise ValueError(f"월별 컬럼 인식 실패: {list(df.columns)}")
 
     d = df.copy()
     d[ycol], d[mcol], d[ccol] = num(d[ycol]), num(d[mcol]), num(d[ccol])
@@ -89,6 +86,7 @@ def prepare_monthly(df: pd.DataFrame) -> pd.DataFrame:
     out["count"] = out["count"].fillna(0).astype(float)
     return out.reset_index(drop=True)
 
+
 def prepare_yearly(df: pd.DataFrame) -> pd.DataFrame:
     year_col = "구분" if "구분" in df.columns else next(
         (c for c in df.columns if ("연도" in c or "년도" in c or str(c).endswith("년"))),
@@ -98,82 +96,209 @@ def prepare_yearly(df: pd.DataFrame) -> pd.DataFrame:
     d["year"] = num(d[year_col])
     d = d.dropna(subset=["year"]).copy()
     d["year"] = d["year"].astype(int)
-    d = d.sort_values("year").reset_index(drop=True)
-    return d
+    return d.sort_values("year").reset_index(drop=True)
+
 
 mdf = prepare_monthly(mraw)
 ydf = prepare_yearly(yraw)
 
 
 # ----------------------------
-# 3) BST 구현 (기간 범위 검색용)
+# B) Red-Black Tree (RBT)
 # ----------------------------
+RED = 1
+BLACK = 0
+
+
 @dataclass
-class Node:
+class RBNode:
     k: Any
     v: Any
-    l: Optional["Node"] = None
-    r: Optional["Node"] = None
-    mn: Any = None
-    mx: Any = None
+    color: int = RED
+    left: Optional["RBNode"] = None
+    right: Optional["RBNode"] = None
+    parent: Optional["RBNode"] = None
 
-def build(items: List[Tuple[Any, Any]]) -> Optional[Node]:
-    """정렬된 (key, value) 리스트로 균형에 가까운 BST 생성"""
-    if not items:
-        return None
-    mid = len(items) // 2
-    k, v = items[mid]
-    n = Node(k, v, build(items[:mid]), build(items[mid + 1 :]))
 
-    mins = [n.k]
-    maxs = [n.k]
-    if n.l:
-        mins.append(n.l.mn); maxs.append(n.l.mx)
-    if n.r:
-        mins.append(n.r.mn); maxs.append(n.r.mx)
-    n.mn = min(mins)
-    n.mx = max(maxs)
-    return n
+class RBTree:
+    def __init__(self):
+        self.nil = RBNode(k=None, v=None, color=BLACK)
+        self.nil.left = self.nil.right = self.nil.parent = self.nil
+        self.root = self.nil
 
-def collect(n: Optional[Node], lo: Any, hi: Any, out: List[Tuple[Any, Any]]) -> None:
-    """[lo, hi] 범위에 들어오는 노드만 inorder 순서로 수집"""
-    if (not n) or (n.mx < lo) or (n.mn > hi):
-        return  # 서브트리 전체가 범위 밖이면 스킵
-    collect(n.l, lo, hi, out)
-    if lo <= n.k <= hi:
-        out.append((n.k, n.v))
-    collect(n.r, lo, hi, out)
+    def _left_rotate(self, x: RBNode) -> None:
+        y = x.right
+        x.right = y.left
+        if y.left != self.nil:
+            y.left.parent = x
+        y.parent = x.parent
+        if x.parent == self.nil:
+            self.root = y
+        elif x == x.parent.left:
+            x.parent.left = y
+        else:
+            x.parent.right = y
+        y.left = x
+        x.parent = y
 
-# 월별 트리: key = date, value = count
-mtree = build(list(zip(mdf["date"].tolist(), mdf["count"].tolist())))
-# 연도별 트리: key = year, value = 해당 행(dict)
-ytree = build(list(zip(ydf["year"].tolist(), ydf.to_dict("records"))))
+    def _right_rotate(self, x: RBNode) -> None:
+        y = x.left
+        x.left = y.right
+        if y.right != self.nil:
+            y.right.parent = x
+        y.parent = x.parent
+        if x.parent == self.nil:
+            self.root = y
+        elif x == x.parent.right:
+            x.parent.right = y
+        else:
+            x.parent.left = y
+        y.right = x
+        x.parent = y
+
+    def _find(self, key: Any) -> RBNode:
+        cur = self.root
+        while cur != self.nil:
+            if key == cur.k:
+                return cur
+            cur = cur.left if key < cur.k else cur.right
+        return self.nil
+
+    def insert(self, key: Any, value: Any) -> None:
+        # 중복이면 업데이트
+        ex = self._find(key)
+        if ex != self.nil:
+            ex.v = value
+            return
+
+        z = RBNode(k=key, v=value, color=RED, left=self.nil, right=self.nil, parent=self.nil)
+
+        y = self.nil
+        x = self.root
+        while x != self.nil:
+            y = x
+            x = x.left if z.k < x.k else x.right
+
+        z.parent = y
+        if y == self.nil:
+            self.root = z
+        elif z.k < y.k:
+            y.left = z
+        else:
+            y.right = z
+
+        self._insert_fixup(z)
+
+    def _insert_fixup(self, z: RBNode) -> None:
+        while z.parent.color == RED:
+            if z.parent == z.parent.parent.left:
+                u = z.parent.parent.right  # 삼촌
+                if u.color == RED:
+                    z.parent.color = BLACK
+                    u.color = BLACK
+                    z.parent.parent.color = RED
+                    z = z.parent.parent
+                else:
+                    if z == z.parent.right:
+                        z = z.parent
+                        self._left_rotate(z)
+                    z.parent.color = BLACK
+                    z.parent.parent.color = RED
+                    self._right_rotate(z.parent.parent)
+            else:
+                u = z.parent.parent.left
+                if u.color == RED:
+                    z.parent.color = BLACK
+                    u.color = BLACK
+                    z.parent.parent.color = RED
+                    z = z.parent.parent
+                else:
+                    if z == z.parent.left:
+                        z = z.parent
+                        self._right_rotate(z)
+                    z.parent.color = BLACK
+                    z.parent.parent.color = RED
+                    self._left_rotate(z.parent.parent)
+        self.root.color = BLACK
+
+    def _minimum(self, x: RBNode) -> RBNode:
+        while x.left != self.nil:
+            x = x.left
+        return x
+
+    def successor(self, x: RBNode) -> RBNode:
+        if x.right != self.nil:
+            return self._minimum(x.right)
+        y = x.parent
+        while y != self.nil and x == y.right:
+            x = y
+            y = y.parent
+        return y
+
+    def lower_bound(self, key: Any) -> RBNode:
+        cur = self.root
+        res = self.nil
+        while cur != self.nil:
+            if cur.k >= key:
+                res = cur
+                cur = cur.left
+            else:
+                cur = cur.right
+        return res
+
+    def range_items(self, lo: Any, hi: Any) -> List[Tuple[Any, Any]]:
+        out: List[Tuple[Any, Any]] = []
+        x = self.lower_bound(lo)
+        while x != self.nil and x.k <= hi:
+            out.append((x.k, x.v))
+            x = self.successor(x)
+        return out
+
+
+def get_tree_month() -> RBTree:
+    key = "mtree_rbt"
+    if key not in st.session_state:
+        t = RBTree()
+        for k, v in zip(mdf["date"].tolist(), mdf["count"].tolist()):
+            t.insert(k, float(v))
+        st.session_state[key] = t
+    return st.session_state[key]
+
+
+def get_tree_year() -> RBTree:
+    key = "ytree_rbt"
+    if key not in st.session_state:
+        t = RBTree()
+        for y, row in zip(ydf["year"].tolist(), ydf.to_dict("records")):
+            t.insert(int(y), row)
+        st.session_state[key] = t
+    return st.session_state[key]
+
+
+mtree = get_tree_month()
+ytree = get_tree_year()
 
 
 # ----------------------------
-# 4) UI 공통
+# C) UI
 # ----------------------------
 with st.sidebar:
-    view = st.radio("보기", ["월별(기간 선택)", "연도별(기간 선택)"])
+    view = st.radio("보기", ["월별(기간)", "연도별(기간)"])
 
-
-# ----------------------------
-# 5) 월별(기간 선택) 화면 (✅ 막대그래프 제거, 라인만)
-# ----------------------------
-if view == "월별(기간 선택)":
+if view == "월별(기간)":
     min_d, max_d = mdf["date"].min().date(), mdf["date"].max().date()
     with st.sidebar:
         start = st.date_input("시작", value=min_d, min_value=min_d, max_value=max_d)
         end = st.date_input("끝", value=max_d, min_value=min_d, max_value=max_d)
 
     if pd.to_datetime(start) > pd.to_datetime(end):
-        st.error("시작 날짜가 끝 날짜보다 늦어.")
+        st.error("시작 날짜가 끝 날짜보다 늦다.")
         st.stop()
 
-    out: List[Tuple[pd.Timestamp, float]] = []
-    collect(mtree, pd.to_datetime(start), pd.to_datetime(end), out)
+    lo, hi = pd.to_datetime(start), pd.to_datetime(end)
+    out = mtree.range_items(lo, hi)
     if not out:
-        st.warning("해당 기간 데이터가 없어.")
+        st.warning("해당 기간 데이터가 없다.")
         st.stop()
 
     fdf = pd.DataFrame(out, columns=["date", "count"]).sort_values("date")
@@ -194,59 +319,47 @@ if view == "월별(기간 선택)":
     st.subheader("📄 필터된 월별 데이터")
     st.dataframe(fdf, use_container_width=True)
 
-
-# ----------------------------
-# 6) 연도별(기간 선택) 화면 (그대로)
-# ----------------------------
 else:
     min_y, max_y = int(ydf["year"].min()), int(ydf["year"].max())
 
-    # 숫자형 지표 컬럼 자동 추출
     candidates: List[str] = []
     for c in ydf.columns:
-        if c in ("year",):  # 내부 컬럼 제외
+        if c == "year":
             continue
         s = num(ydf[c])
         if s.notna().mean() >= 0.4:
             candidates.append(c)
 
     if not candidates:
-        st.error("연도별 CSV에서 숫자형 지표 컬럼을 찾지 못했어.")
+        st.error("연도별 CSV에서 숫자형 지표 컬럼을 찾지 못했다.")
         st.write("현재 컬럼:", list(ydf.columns))
         st.stop()
 
     with st.sidebar:
         yr_lo, yr_hi = st.slider("연도 범위", min_y, max_y, (min_y, max_y))
-        chosen = st.multiselect(
-            "그릴 지표(여러 개 가능)",
-            options=candidates,
-            default=candidates[:2] if len(candidates) >= 2 else candidates[:1],
-        )
+        chosen = st.multiselect("그릴 지표", options=candidates, default=candidates[:1])
 
     if not chosen:
-        st.info("사이드바에서 지표를 최소 1개 선택해줘.")
+        st.info("지표를 최소 1개 선택해라.")
         st.stop()
 
-    out: List[Tuple[int, Dict[str, Any]]] = []
-    collect(ytree, yr_lo, yr_hi, out)
+    out = ytree.range_items(yr_lo, yr_hi)
     if not out:
-        st.warning("해당 연도 범위 데이터가 없어.")
+        st.warning("해당 연도 범위 데이터가 없다.")
         st.stop()
 
     rows = [r for _, r in sorted(out, key=lambda x: x[0])]
     tdf = pd.DataFrame(rows)
-    # 연도 컬럼 보정
     tdf["year"] = pd.to_numeric(tdf.get("year", tdf.get("구분")), errors="coerce").astype("Int64")
 
-    # 선택된 컬럼 숫자화
     for c in chosen:
         tdf[c] = num(tdf[c])
 
     st.subheader(f"📊 연도별 비교: {yr_lo} ~ {yr_hi}")
+
     fig, ax = plt.subplots(figsize=(10, 4.6))
     for c in chosen:
         ax.plot(tdf["year"], tdf[c], marker="o", linewidth=2, label=c)
-
     ax.set_xlabel("연도")
     ax.set_ylabel("값")
     ax.grid(True, alpha=0.3)
