@@ -1,401 +1,349 @@
-# pages/voicefishing.py
-import re
+# pages/06_tree_benchmark.py
+import time, random, re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
 
 import streamlit as st
 import pandas as pd
-import matplotlib.pyplot as plt
 
+st.title("🌲 BST vs Red-Black Tree 효율 비교(직접 실험)")
 
-# ✅ pages 파일에서는 set_page_config() 금지/권장X
-# (main.py에서만 1번, 그리고 st.* 중 가장 먼저 실행)
+# -----------------------------
+# 1) 월별 CSV -> (key:int, value:float) 만들기
+# -----------------------------
+ROOT = Path(__file__).resolve().parents[1]
+CSV = ROOT / "police_voicephishing_monthly.csv"
 
-
-st.title("📞 보이스피싱 대시보드 (Red-Black Tree로 기간 검색)")
-
-
-# ----------------------------
-# 1) 파일 로드 (현재 작업폴더가 루트든 pages든 둘 다 대응)
-# ----------------------------
-def pick(*cands: str) -> Path:
-    """후보 경로들 중 실제 존재하는 파일을 하나 고른다."""
-    for s in cands:
-        p = Path(s)
-        if p.exists():
-            return p
-    raise FileNotFoundError(f"CSV를 못 찾음: {cands}")
-
-
-def read_csv_smart(path: Path) -> pd.DataFrame:
-    """공공데이터 CSV 인코딩(utf-8-sig/cp949/euc-kr 등) 자동 시도해서 읽는다."""
+def read_csv_smart(p: Path) -> pd.DataFrame:
     for enc in ("utf-8-sig", "cp949", "euc-kr", "utf-8"):
         try:
-            return pd.read_csv(path, encoding=enc)
+            return pd.read_csv(p, encoding=enc)
         except Exception:
             pass
-    return pd.read_csv(path, encoding="utf-8", encoding_errors="ignore")
-
+    return pd.read_csv(p, encoding="utf-8", encoding_errors="ignore")
 
 def num(s: pd.Series) -> pd.Series:
-    """콤마/공백 제거 후 숫자로 변환(실패는 NaN)."""
-    return pd.to_numeric(
-        s.astype(str).str.replace(",", "", regex=False).str.strip(),
-        errors="coerce",
-    )
+    return pd.to_numeric(s.astype(str).str.replace(",", "", regex=False).str.strip(), errors="coerce")
 
+if not CSV.exists():
+    st.error(f"CSV 파일이 없음: {CSV}")
+    st.stop()
 
-monthly_path = pick(
-    "police_voicephishing_monthly.csv",
-    "../police_voicephishing_monthly.csv",
-    "data/police_voicephishing_monthly.csv",
-    "../data/police_voicephishing_monthly.csv",
-)
-yearly_path = pick(
-    "police_voicephishing_yearly.csv",
-    "../police_voicephishing_yearly.csv",
-    "data/police_voicephishing_yearly.csv",
-    "../data/police_voicephishing_yearly.csv",
-)
-
-with st.expander("🔎 파일 경로 확인"):
-    st.write("월별 CSV:", str(monthly_path))
-    st.write("연도별 CSV:", str(yearly_path))
-
-mraw = read_csv_smart(monthly_path)
-yraw = read_csv_smart(yearly_path)
+mraw = read_csv_smart(CSV)
 mraw.columns = mraw.columns.astype(str).str.strip()
-yraw.columns = yraw.columns.astype(str).str.strip()
 
+ycol = next((c for c in mraw.columns if re.search(r"연도|년도|년", c)), None)
+mcol = next((c for c in mraw.columns if re.search(r"월", c)), None)
+ccol = next((c for c in mraw.columns if ("발생" in c and "건수" in c)), None)
+if not (ycol and mcol and ccol):
+    st.error(f"컬럼 인식 실패: {list(mraw.columns)}")
+    st.stop()
 
-# ----------------------------
-# 2) 월별/연도별 전처리
-# ----------------------------
-def prepare_monthly(df: pd.DataFrame) -> pd.DataFrame:
-    """월별 CSV에서 (date, count)만 뽑아 시계열 DataFrame으로 만든다."""
-    ycol = next((c for c in df.columns if re.search(r"연도|년도|년", c)), None)
-    mcol = next((c for c in df.columns if re.search(r"월", c)), None)
-    ccol = next((c for c in df.columns if ("발생" in c and "건수" in c)), None)
-    if not (ycol and mcol and ccol):
-        raise ValueError(f"월별 CSV 컬럼 인식 실패: {list(df.columns)}")
+df = mraw.copy()
+df[ycol], df[mcol], df[ccol] = num(df[ycol]), num(df[mcol]), num(df[ccol])
+df["date"] = pd.to_datetime(
+    df[ycol].astype("Int64").astype(str) + "-" + df[mcol].astype("Int64").astype(str).str.zfill(2) + "-01",
+    errors="coerce",
+)
+df = df.dropna(subset=["date"]).sort_values("date")
+df = df[["date", ccol]].rename(columns={ccol: "count"}).reset_index(drop=True)
+df["count"] = df["count"].fillna(0).astype(float)
 
-    d = df.copy()
-    d[ycol], d[mcol], d[ccol] = num(d[ycol]), num(d[mcol]), num(d[ccol])
+# key를 int(ns)로 바꾸면 비교가 빨라지고 실험도 안정적임
+base_keys = df["date"].astype("int64").tolist()
+base_vals = df["count"].tolist()
+base_items = list(zip(base_keys, base_vals))
+step = int(pd.Timedelta(days=400).value)  # 배수 확장 시 키 겹침 방지
 
-    d["date"] = pd.to_datetime(
-        d[ycol].astype("Int64").astype(str)
-        + "-"
-        + d[mcol].astype("Int64").astype(str).str.zfill(2)
-        + "-01",
-        errors="coerce",
-    )
-    d = d.dropna(subset=["date"]).sort_values("date")
-    out = d[["date", ccol]].rename(columns={ccol: "count"}).copy()
-    out["count"] = out["count"].fillna(0).astype(float)
-    return out.reset_index(drop=True)
+with st.expander("🔎 데이터 확인"):
+    st.write("월 개수:", len(base_items))
+    st.dataframe(df.head(10), use_container_width=True)
 
-
-def prepare_yearly(df: pd.DataFrame) -> pd.DataFrame:
-    """연도별 CSV에서 year(정수)를 만들고 연도순으로 정렬한다."""
-    year_col = "구분" if "구분" in df.columns else next(
-        (c for c in df.columns if ("연도" in c or "년도" in c or str(c).endswith("년"))),
-        df.columns[0],
-    )
-    d = df.copy()
-    d["year"] = num(d[year_col])
-    d = d.dropna(subset=["year"]).copy()
-    d["year"] = d["year"].astype(int)
-    d = d.sort_values("year").reset_index(drop=True)
-    return d
-
-
-mdf = prepare_monthly(mraw)
-ydf = prepare_yearly(yraw)
-
-
-# ----------------------------
-# 3) Red-Black Tree 구현 (범위 조회: lower_bound + successor)
-# ----------------------------
-RED = 1
-BLACK = 0
-
-
+# -----------------------------
+# 2) BST (불균형 가능)
+# -----------------------------
 @dataclass
-class RBNode:
-    k: Any
-    v: Any
-    color: int = RED
-    left: Optional["RBNode"] = None
-    right: Optional["RBNode"] = None
-    parent: Optional["RBNode"] = None
+class BSTNode:
+    k: int
+    v: float
+    left: "BSTNode|None" = None
+    right: "BSTNode|None" = None
+    parent: "BSTNode|None" = None
 
-
-class RBTree:
+class BST:
     def __init__(self):
-        # NIL 센티넬 노드(리프 역할, 항상 BLACK)
-        self.nil = RBNode(k=None, v=None, color=BLACK)
-        self.nil.left = self.nil.right = self.nil.parent = self.nil
-        self.root = self.nil
+        self.root = None
 
-    def _left_rotate(self, x: RBNode) -> None:
-        y = x.right
-        x.right = y.left
-        if y.left != self.nil:
-            y.left.parent = x
-        y.parent = x.parent
-        if x.parent == self.nil:
-            self.root = y
-        elif x == x.parent.left:
-            x.parent.left = y
-        else:
-            x.parent.right = y
-        y.left = x
-        x.parent = y
-
-    def _right_rotate(self, x: RBNode) -> None:
-        y = x.left
-        x.left = y.right
-        if y.right != self.nil:
-            y.right.parent = x
-        y.parent = x.parent
-        if x.parent == self.nil:
-            self.root = y
-        elif x == x.parent.right:
-            x.parent.right = y
-        else:
-            x.parent.left = y
-        y.right = x
-        x.parent = y
-
-    def _find_node(self, key: Any) -> RBNode:
-        cur = self.root
-        while cur != self.nil:
-            if key == cur.k:
-                return cur
-            cur = cur.left if key < cur.k else cur.right
-        return self.nil
-
-    def insert(self, key: Any, value: Any) -> None:
-        # 중복 키면 값만 갱신
-        existing = self._find_node(key)
-        if existing != self.nil:
-            existing.v = value
+    def insert(self, k: int, v: float):
+        if self.root is None:
+            self.root = BSTNode(k, v)
             return
+        cur, parent = self.root, None
+        while cur is not None:
+            parent = cur
+            if k == cur.k:
+                cur.v = v
+                return
+            cur = cur.left if k < cur.k else cur.right
+        node = BSTNode(k, v, parent=parent)
+        if k < parent.k: parent.left = node
+        else: parent.right = node
 
-        # 새 노드는 RED로 삽입
-        z = RBNode(k=key, v=value, color=RED, left=self.nil, right=self.nil, parent=self.nil)
-
-        # BST 규칙대로 삽입 위치 찾기
-        y = self.nil
-        x = self.root
-        while x != self.nil:
-            y = x
-            x = x.left if z.k < x.k else x.right
-
-        z.parent = y
-        if y == self.nil:
-            self.root = z
-        elif z.k < y.k:
-            y.left = z
-        else:
-            y.right = z
-
-        # 색 규칙 깨진 부분 복구
-        self._insert_fixup(z)
-
-    def _insert_fixup(self, z: RBNode) -> None:
-        while z.parent.color == RED:
-            if z.parent == z.parent.parent.left:
-                y = z.parent.parent.right  # 삼촌(uncle)
-                if y.color == RED:
-                    # Case 1: 삼촌이 RED -> recolor
-                    z.parent.color = BLACK
-                    y.color = BLACK
-                    z.parent.parent.color = RED
-                    z = z.parent.parent
-                else:
-                    if z == z.parent.right:
-                        # Case 2: 꺾임 -> 회전으로 일자 만들기
-                        z = z.parent
-                        self._left_rotate(z)
-                    # Case 3: 일자 -> 회전 + recolor
-                    z.parent.color = BLACK
-                    z.parent.parent.color = RED
-                    self._right_rotate(z.parent.parent)
-            else:
-                # 좌우 대칭(미러)
-                y = z.parent.parent.left
-                if y.color == RED:
-                    z.parent.color = BLACK
-                    y.color = BLACK
-                    z.parent.parent.color = RED
-                    z = z.parent.parent
-                else:
-                    if z == z.parent.left:
-                        z = z.parent
-                        self._right_rotate(z)
-                    z.parent.color = BLACK
-                    z.parent.parent.color = RED
-                    self._left_rotate(z.parent.parent)
-        self.root.color = BLACK
-
-    def _minimum(self, x: RBNode) -> RBNode:
-        while x.left != self.nil:
-            x = x.left
-        return x
-
-    def successor(self, x: RBNode) -> RBNode:
-        if x.right != self.nil:
-            return self._minimum(x.right)
-        y = x.parent
-        while y != self.nil and x == y.right:
-            x = y
-            y = y.parent
-        return y
-
-    def lower_bound(self, key: Any) -> RBNode:
-        """key 이상인 가장 작은 노드"""
-        cur = self.root
-        res = self.nil
-        while cur != self.nil:
-            if cur.k >= key:
+    def lower_bound(self, k: int):
+        cur, res = self.root, None
+        while cur is not None:
+            if cur.k >= k:
                 res = cur
                 cur = cur.left
             else:
                 cur = cur.right
         return res
 
-    def range_items(self, lo: Any, hi: Any) -> List[Tuple[Any, Any]]:
-        """[lo, hi] 범위의 (key, value)들을 오름차순으로 반환"""
-        out: List[Tuple[Any, Any]] = []
+    def _minimum(self, x: BSTNode):
+        while x.left is not None:
+            x = x.left
+        return x
+
+    def successor(self, x: BSTNode):
+        if x.right is not None:
+            return self._minimum(x.right)
+        y = x.parent
+        while y is not None and x == y.right:
+            x, y = y, y.parent
+        return y
+
+    def range_count(self, lo: int, hi: int) -> int:
+        cnt = 0
+        x = self.lower_bound(lo)
+        while x is not None and x.k <= hi:
+            cnt += 1
+            x = self.successor(x)
+        return cnt
+
+    # ✅ 재귀 금지(배수 100에서 RecursionError 방지)
+    def height(self) -> int:
+        if self.root is None:
+            return 0
+        maxh = 0
+        stack = [(self.root, 1)]
+        while stack:
+            node, h = stack.pop()
+            if h > maxh: maxh = h
+            if node.left is not None: stack.append((node.left, h + 1))
+            if node.right is not None: stack.append((node.right, h + 1))
+        return maxh
+
+# -----------------------------
+# 3) Red-Black Tree (균형 유지)
+# -----------------------------
+RED, BLACK = 1, 0
+
+class RBNode:
+    __slots__ = ("k","v","c","l","r","p")
+    def __init__(self, k=None, v=None, c=BLACK):
+        self.k, self.v, self.c = k, v, c
+        self.l = self.r = self.p = None
+
+class RBTree:
+    def __init__(self):
+        self.nil = RBNode(c=BLACK)
+        self.nil.l = self.nil.r = self.nil.p = self.nil
+        self.root = self.nil
+
+    def _lrot(self, x):
+        y = x.r
+        x.r = y.l
+        if y.l != self.nil: y.l.p = x
+        y.p = x.p
+        if x.p == self.nil: self.root = y
+        elif x == x.p.l: x.p.l = y
+        else: x.p.r = y
+        y.l = x
+        x.p = y
+
+    def _rrot(self, x):
+        y = x.l
+        x.l = y.r
+        if y.r != self.nil: y.r.p = x
+        y.p = x.p
+        if x.p == self.nil: self.root = y
+        elif x == x.p.r: x.p.r = y
+        else: x.p.l = y
+        y.r = x
+        x.p = y
+
+    def insert(self, k: int, v: float):
+        z = RBNode(k, v, RED)
+        z.l = z.r = z.p = self.nil
+        y, x = self.nil, self.root
+        while x != self.nil:
+            y = x
+            x = x.l if k < x.k else x.r
+        z.p = y
+        if y == self.nil: self.root = z
+        elif k < y.k: y.l = z
+        else: y.r = z
+        self._fix(z)
+
+    def _fix(self, z):
+        while z.p.c == RED:
+            if z.p == z.p.p.l:
+                u = z.p.p.r
+                if u.c == RED:
+                    z.p.c = BLACK; u.c = BLACK; z.p.p.c = RED
+                    z = z.p.p
+                else:
+                    if z == z.p.r:
+                        z = z.p
+                        self._lrot(z)
+                    z.p.c = BLACK; z.p.p.c = RED
+                    self._rrot(z.p.p)
+            else:
+                u = z.p.p.l
+                if u.c == RED:
+                    z.p.c = BLACK; u.c = BLACK; z.p.p.c = RED
+                    z = z.p.p
+                else:
+                    if z == z.p.l:
+                        z = z.p
+                        self._rrot(z)
+                    z.p.c = BLACK; z.p.p.c = RED
+                    self._lrot(z.p.p)
+        self.root.c = BLACK
+
+    def lower_bound(self, k: int):
+        x, res = self.root, self.nil
+        while x != self.nil:
+            if x.k >= k:
+                res = x
+                x = x.l
+            else:
+                x = x.r
+        return res
+
+    def _min(self, x):
+        while x.l != self.nil:
+            x = x.l
+        return x
+
+    def succ(self, x):
+        if x.r != self.nil:
+            return self._min(x.r)
+        y = x.p
+        while y != self.nil and x == y.r:
+            x, y = y, y.p
+        return y
+
+    def range_count(self, lo: int, hi: int) -> int:
+        cnt = 0
         x = self.lower_bound(lo)
         while x != self.nil and x.k <= hi:
-            out.append((x.k, x.v))
-            x = self.successor(x)
-        return out
+            cnt += 1
+            x = self.succ(x)
+        return cnt
 
+    # ✅ 재귀 금지(안전)
+    def height(self) -> int:
+        if self.root == self.nil:
+            return 0
+        maxh = 0
+        stack = [(self.root, 1)]
+        while stack:
+            node, h = stack.pop()
+            if h > maxh: maxh = h
+            if node.l != self.nil: stack.append((node.l, h + 1))
+            if node.r != self.nil: stack.append((node.r, h + 1))
+        return maxh
 
-@st.cache_resource(show_spinner=False)
-def build_month_tree(df: pd.DataFrame) -> RBTree:
-    t = RBTree()
-    for k, v in zip(df["date"].tolist(), df["count"].tolist()):
-        t.insert(k, float(v))
-    return t
+# -----------------------------
+# 4) 벤치마크
+# -----------------------------
+def make_items(mult: int, order: str, seed: int):
+    items = []
+    for t in range(mult):
+        off = t * step
+        for k, v in base_items:
+            items.append((k + off, v))
+    if order == "정렬(최악: BST 쏠림)":
+        items.sort(key=lambda x: x[0])
+    elif order == "역순(최악)":
+        items.sort(key=lambda x: x[0], reverse=True)
+    else:
+        rnd = random.Random(seed)
+        rnd.shuffle(items)
+    return items
 
+def make_ranges(keys, q: int, seed: int):
+    rnd = random.Random(seed)
+    n = len(keys)
+    ranges = []
+    for _ in range(q):
+        i = rnd.randrange(n); j = rnd.randrange(n)
+        a, b = keys[i], keys[j]
+        ranges.append((a, b) if a <= b else (b, a))
+    return ranges
 
-@st.cache_resource(show_spinner=False)
-def build_year_tree(df: pd.DataFrame) -> RBTree:
-    t = RBTree()
-    for y, row in zip(df["year"].tolist(), df.to_dict("records")):
-        t.insert(int(y), row)
-    return t
+def bench(items, ranges):
+    # build
+    t0 = time.perf_counter()
+    bst = BST()
+    for k, v in items: bst.insert(k, v)
+    t1 = time.perf_counter()
 
+    rbt = RBTree()
+    for k, v in items: rbt.insert(k, v)
+    t2 = time.perf_counter()
 
-mtree = build_month_tree(mdf)
-ytree = build_year_tree(ydf)
+    # query (리스트 생성 없이 count만)
+    q0 = time.perf_counter()
+    s1 = 0
+    for lo, hi in ranges: s1 += bst.range_count(lo, hi)
+    q1 = time.perf_counter()
 
+    q2 = time.perf_counter()
+    s2 = 0
+    for lo, hi in ranges: s2 += rbt.range_count(lo, hi)
+    q3 = time.perf_counter()
 
-# ----------------------------
-# 4) UI 공통
-# ----------------------------
+    return {
+        "n_items": len(items),
+        "n_queries": len(ranges),
+        "BST build(ms)": (t1 - t0) * 1000,
+        "RBT build(ms)": (t2 - t1) * 1000,
+        "BST query(ms)": (q1 - q0) * 1000,
+        "RBT query(ms)": (q3 - q2) * 1000,
+        "BST height": bst.height(),
+        "RBT height": rbt.height(),
+        "BST total_hits": s1,
+        "RBT total_hits": s2,
+    }
+
 with st.sidebar:
-    view = st.radio("보기", ["월별(기간 선택)", "연도별(기간 선택)"])
+    st.subheader("실험 설정")
+    mult = st.selectbox("데이터 확장 배수", [1, 10, 50, 100], index=1, key="bm_mult")
+    order = st.selectbox("삽입 순서", ["정렬(최악: BST 쏠림)", "역순(최악)", "셔플(평균)"], key="bm_order")
+    q = st.slider("범위 조회 횟수 Q", 10, 2000, 500, 10, key="bm_q")
+    seed = st.number_input("랜덤 시드", value=42, step=1, key="bm_seed")
+    run = st.button("🚀 실행", key="bm_run")
 
+if run:
+    try:
+        items = make_items(mult, order, seed)
+        keys = [k for k, _ in items]
+        ranges = make_ranges(keys, q, seed)
 
-# ----------------------------
-# 5) 월별(기간 선택) 화면 (라인만)
-# ----------------------------
-if view == "월별(기간 선택)":
-    min_d, max_d = mdf["date"].min().date(), mdf["date"].max().date()
-    with st.sidebar:
-        start = st.date_input("시작", value=min_d, min_value=min_d, max_value=max_d)
-        end = st.date_input("끝", value=max_d, min_value=min_d, max_value=max_d)
+        res = bench(items, ranges)
+        st.dataframe(pd.DataFrame([res]), use_container_width=True)
 
-    if pd.to_datetime(start) > pd.to_datetime(end):
-        st.error("시작 날짜가 끝 날짜보다 늦어.")
-        st.stop()
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("BST 높이", str(res["BST height"]))
+        c2.metric("RBT 높이", str(res["RBT height"]))
+        c3.metric("BST query(ms)", f"{res['BST query(ms)']:.1f}")
+        c4.metric("RBT query(ms)", f"{res['RBT query(ms)']:.1f}")
 
-    lo = pd.to_datetime(start)
-    hi = pd.to_datetime(end)
-    out = mtree.range_items(lo, hi)
-    if not out:
-        st.warning("해당 기간 데이터가 없어.")
-        st.stop()
-
-    fdf = pd.DataFrame(out, columns=["date", "count"]).sort_values("date")
-
-    a, b, c = st.columns(3)
-    a.metric("총합", f"{int(fdf['count'].sum()):,}")
-    b.metric("평균", f"{fdf['count'].mean():,.1f}")
-    c.metric("개월 수", f"{len(fdf):,}")
-
-    fig, ax = plt.subplots(figsize=(10, 4.6))
-    ax.plot(fdf["date"], fdf["count"], marker="o", linewidth=2)
-    ax.set_xlabel("월")
-    ax.set_ylabel("발생건수")
-    ax.grid(True, alpha=0.3)
-    fig.autofmt_xdate()
-    st.pyplot(fig, use_container_width=True, clear_figure=True)
-
-    st.subheader("📄 필터된 월별 데이터")
-    st.dataframe(fdf, use_container_width=True)
-
-
-# ----------------------------
-# 6) 연도별(기간 선택) 화면
-# ----------------------------
+        st.info("팁: 삽입 순서를 '정렬(최악)'로 두고 배수를 올리면 BST가 한쪽으로 쏠려 차이가 잘 보인다.")
+    except Exception as e:
+        st.error("에러 원인:")
+        st.exception(e)
 else:
-    min_y, max_y = int(ydf["year"].min()), int(ydf["year"].max())
-
-    candidates: List[str] = []
-    for c in ydf.columns:
-        if c in ("year",):
-            continue
-        s = num(ydf[c])
-        if s.notna().mean() >= 0.4:
-            candidates.append(c)
-
-    if not candidates:
-        st.error("연도별 CSV에서 숫자형 지표 컬럼을 찾지 못했어.")
-        st.write("현재 컬럼:", list(ydf.columns))
-        st.stop()
-
-    with st.sidebar:
-        yr_lo, yr_hi = st.slider("연도 범위", min_y, max_y, (min_y, max_y))
-        chosen = st.multiselect(
-            "그릴 지표(여러 개 가능)",
-            options=candidates,
-            default=candidates[:2] if len(candidates) >= 2 else candidates[:1],
-        )
-
-    if not chosen:
-        st.info("사이드바에서 지표를 최소 1개 선택해줘.")
-        st.stop()
-
-    out = ytree.range_items(yr_lo, yr_hi)
-    if not out:
-        st.warning("해당 연도 범위 데이터가 없어.")
-        st.stop()
-
-    rows = [r for _, r in sorted(out, key=lambda x: x[0])]
-    tdf = pd.DataFrame(rows)
-    tdf["year"] = pd.to_numeric(tdf.get("year", tdf.get("구분")), errors="coerce").astype("Int64")
-
-    for c in chosen:
-        tdf[c] = num(tdf[c])
-
-    st.subheader(f"📊 연도별 비교: {yr_lo} ~ {yr_hi}")
-    fig, ax = plt.subplots(figsize=(10, 4.6))
-    for c in chosen:
-        ax.plot(tdf["year"], tdf[c], marker="o", linewidth=2, label=c)
-
-    ax.set_xlabel("연도")
-    ax.set_ylabel("값")
-    ax.grid(True, alpha=0.3)
-    ax.legend(loc="best")
-    ax.set_xticks(sorted(tdf["year"].dropna().astype(int).unique()))
-    st.pyplot(fig, use_container_width=True, clear_figure=True)
-
-    st.subheader("📄 필터된 연도별 데이터")
-    st.dataframe(tdf[["year"] + chosen], use_container_width=True)
+    st.write("왼쪽에서 설정하고 실행을 눌러봐.")
