@@ -1,205 +1,188 @@
 import os
+import glob
+import re
 import pandas as pd
 import streamlit as st
 import plotly.express as px
 
-st.set_page_config(page_title="자연재난 피해 시각화", layout="wide")
+st.set_page_config(page_title="이상기후별 피해액 분석", layout="wide")
 
-st.title("자연재난(이상기후) 피해 시각화 대시보드")
-st.caption("CSV(롱포맷): 재난원인, 구분, 연도, 금액")
+st.title("이상기후별 피해액 분석 (2015~2023)")
+st.caption("데이터: 자연재난상황통계(피해액) / PPT 발표용으로 항목 정리(지진·풍랑 제거, 합계 제거, 가/나 통일)")
 
 # -----------------------------
-# Data loading helpers
+# CSV Load
 # -----------------------------
 def load_default_csv():
-    # 네가 방금 만든 파일 경로(로컬에서 실행할 때 사용)
-    default_path = "natural_disaster_damage_long.csv"
-    if os.path.exists(default_path):
-        return pd.read_csv(default_path, encoding="utf-8-sig")
+    candidates = [
+        "natural_disaster_damage_long.csv",
+        "./natural_disaster_damage_long.csv",
+        "./data/natural_disaster_damage_long.csv",
+    ]
+    for p in candidates:
+        if os.path.exists(p):
+            return pd.read_csv(p, encoding="utf-8-sig")
+
+    found = glob.glob("**/*.csv", recursive=True)
+    prefer = [f for f in found if os.path.basename(f) == "natural_disaster_damage_long.csv"]
+    if prefer:
+        return pd.read_csv(prefer[0], encoding="utf-8-sig")
     return None
+
 
 def clean_df(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-    # 컬럼명 공백 제거
-    df.columns = [c.strip() for c in df.columns]
+    df.columns = [str(c).strip() for c in df.columns]
 
     needed = {"재난원인", "구분", "연도", "금액"}
-    if not needed.issubset(set(df.columns)):
+    if not needed.issubset(df.columns):
         raise ValueError(f"필수 컬럼이 없습니다. 필요={needed}, 현재={set(df.columns)}")
 
     df["재난원인"] = df["재난원인"].astype(str).str.strip()
     df["구분"] = df["구분"].astype(str).str.strip()
-    df["연도"] = pd.to_numeric(df["연도"], errors="coerce").astype("Int64")
+
+    df["연도"] = pd.to_numeric(df["연도"], errors="coerce")
     df["금액"] = pd.to_numeric(df["금액"], errors="coerce")
 
-    df = df.dropna(subset=["연도", "금액"])
-    df = df.sort_values(["재난원인", "구분", "연도"]).reset_index(drop=True)
+    df = df.dropna(subset=["연도", "금액"]).copy()
+    df["연도"] = df["연도"].astype(int)
+
     return df
 
+
+def normalize_cause(s: str) -> str:
+    # 표기 흔들림 정리: 공백 제거, 점(·) 처리 정도만
+    x = str(s).strip()
+    x = x.replace("·", ",")
+    x = re.sub(r"\s+", "", x)
+    return x
+
+
 # -----------------------------
-# Sidebar controls
+# Sidebar
 # -----------------------------
 with st.sidebar:
     st.header("데이터 불러오기")
-    up = st.file_uploader("롱포맷 CSV 업로드", type=["csv"])
-    st.caption("없으면 같은 폴더의 natural_disaster_damage_long.csv를 자동으로 찾습니다.")
+    up = st.file_uploader("CSV 업로드(롱포맷)", type=["csv"])
+    st.caption("업로드 안 하면 레포에서 natural_disaster_damage_long.csv 자동 탐색")
 
     st.divider()
-    st.header("필터")
+    st.header("PPT용 필터(추천 설정)")
 
-# Load data
+    # 가/나 통일
+    metric = st.radio("구분(가/나)", ["가만 보기", "나만 보기", "둘 다 보기"], index=0)
+
+    # 분석 대상 이상기후(3P 기준: 풍랑 제거, 지진 제거)
+    st.caption("분석 대상(이상기후): 호우/태풍/대설/강풍/폭염")
+    use_default_causes = st.checkbox("이상기후 5종만 고정", value=True)
+
+    st.divider()
+    st.header("그래프 옵션")
+    remove_total = st.checkbox("‘합계’ 항목 제거", value=True)
+    show_markers = st.checkbox("라인차트 점 표시", value=True)
+
+# Load
 if up is not None:
     df_raw = pd.read_csv(up, encoding="utf-8-sig")
 else:
     df_raw = load_default_csv()
 
 if df_raw is None:
-    st.warning("CSV를 업로드하거나, 실행 폴더에 natural_disaster_damage_long.csv를 두세요.")
+    st.warning("CSV를 업로드하거나, 레포에 natural_disaster_damage_long.csv를 넣어주세요.")
+    st.write("현재 폴더 파일:", os.listdir("."))
     st.stop()
 
-try:
-    df = clean_df(df_raw)
-except Exception as e:
-    st.error(f"데이터 처리 실패: {e}")
-    st.stop()
+df = clean_df(df_raw)
 
-# Filters
-all_causes = sorted(df["재난원인"].unique().tolist())
-all_types = sorted(df["구분"].unique().tolist())
+# Normalize cause
+df["재난원인_norm"] = df["재난원인"].apply(normalize_cause)
 
+# Remove '합계'
+if remove_total:
+    df = df[df["재난원인_norm"] != "합계"].copy()
+
+# Remove 지진 / 풍랑(풍랑,강풍 포함 전부 제거)
+df = df[~df["재난원인_norm"].str.contains("지진")].copy()
+df = df[~df["재난원인_norm"].str.contains("풍랑")].copy()
+
+# Metric filter (가/나)
+if metric == "가만 보기":
+    df = df[df["구분"] == "가"].copy()
+elif metric == "나만 보기":
+    df = df[df["구분"] == "나"].copy()
+
+# Keep only 5 climate-related causes (PPT 3P와 일치)
+allowed = ["호우", "태풍", "대설", "강풍", "폭염"]
+if use_default_causes:
+    df = df[df["재난원인_norm"].isin(allowed)].copy()
+
+# Year range
 min_year, max_year = int(df["연도"].min()), int(df["연도"].max())
 
 with st.sidebar:
     year_range = st.slider("연도 범위", min_year, max_year, (min_year, max_year), step=1)
 
-    causes = st.multiselect(
-        "재난원인(여러 개 선택 가능)",
-        options=all_causes,
-        default=all_causes
-    )
+# Apply year filter
+df = df[(df["연도"] >= year_range[0]) & (df["연도"] <= year_range[1])].copy()
 
-    types = st.multiselect(
-        "구분(여러 개 선택 가능)",
-        options=all_types,
-        default=all_types
-    )
-
-    view_mode = st.radio(
-        "구분 방법(그래프 분리 방식)",
-        ["색으로 구분(한 그래프)", "구분별 그래프 나누기(패싯)"],
-        index=0
-    )
-
-# Apply filters
-dff = df[
-    (df["연도"] >= year_range[0]) &
-    (df["연도"] <= year_range[1]) &
-    (df["재난원인"].isin(causes)) &
-    (df["구분"].isin(types))
-].copy()
+if df.empty:
+    st.warning("필터 결과가 비었습니다. 조건을 바꿔주세요.")
+    st.stop()
 
 # -----------------------------
-# Summary KPIs
-# -----------------------------
-c1, c2, c3 = st.columns(3)
-with c1:
-    st.metric("선택된 재난원인 수", len(causes))
-with c2:
-    st.metric("선택된 구분 수", len(types))
-with c3:
-    st.metric("표본 행 수", len(dff))
-
-st.divider()
-
-# -----------------------------
-# Chart 1: Yearly trend (line)
+# 1) Line chart (trend)
 # -----------------------------
 st.subheader("1) 연도별 추세 (라인차트)")
 
-if dff.empty:
-    st.warning("필터 결과가 비었습니다. 조건을 바꿔보세요.")
-    st.stop()
-
-# 합쳐서 보기(원인+구분을 한 번에 구분 가능하게 라벨 생성)
-dff["라벨"] = dff["재난원인"] + " | " + dff["구분"]
-
-if view_mode.startswith("색으로"):
-    fig1 = px.line(
-        dff,
-        x="연도",
-        y="금액",
-        color="라벨",
-        markers=True,
-        hover_data=["재난원인", "구분", "연도", "금액"],
-        title="연도별 피해(금액) 변화"
-    )
+# 라벨: 가/나 둘 다 볼 때만 구분을 붙여 혼동 방지
+if metric == "둘 다 보기":
+    df["라벨"] = df["재난원인_norm"] + " " + df["구분"]
+    color_col = "라벨"
 else:
-    fig1 = px.line(
-        dff,
-        x="연도",
-        y="금액",
-        color="재난원인",
-        facet_col="구분",
-        facet_col_wrap=2,
-        markers=True,
-        hover_data=["재난원인", "구분", "연도", "금액"],
-        title="연도별 피해(금액) 변화 (구분별 분리)"
-    )
-    fig1.for_each_annotation(lambda a: a.update(text=a.text.replace("구분=", "구분: ")))
+    df["라벨"] = df["재난원인_norm"]
+    color_col = "라벨"
 
+fig1 = px.line(
+    df.sort_values(["라벨", "연도"]),
+    x="연도",
+    y="금액",
+    color=color_col,
+    markers=show_markers,
+    title="연도별 피해(금액) 변화"
+)
 st.plotly_chart(fig1, use_container_width=True)
 
 # -----------------------------
-# Chart 2: Total by cause (bar)
+# 2) Bar chart (total comparison)
 # -----------------------------
 st.subheader("2) 기간 합계 비교 (막대그래프)")
 
-agg_cause = (
-    dff.groupby(["재난원인"], as_index=False)["금액"]
-    .sum()
-    .sort_values("금액", ascending=False)
+agg = (
+    df.groupby("재난원인_norm", as_index=False)["금액"]
+      .sum()
+      .sort_values("금액", ascending=False)
 )
 
 fig2 = px.bar(
-    agg_cause,
+    agg,
     x="금액",
-    y="재난원인",
+    y="재난원인_norm",
     orientation="h",
-    hover_data=["재난원인", "금액"],
     title=f"{year_range[0]}~{year_range[1]} 기간 합계(재난원인별)"
 )
 st.plotly_chart(fig2, use_container_width=True)
 
 # -----------------------------
-# Chart 3: Heatmap (cause x year)
+# 3) Table + download
 # -----------------------------
-st.subheader("3) 히트맵 (재난원인 × 연도)")
+st.subheader("3) 데이터 확인")
 
-pivot = (
-    dff.groupby(["재난원인", "연도"], as_index=False)["금액"].sum()
-    .pivot(index="재난원인", columns="연도", values="금액")
-    .fillna(0)
-)
+show_cols = ["재난원인", "재난원인_norm", "구분", "연도", "금액"]
+st.dataframe(df[show_cols].sort_values(["재난원인_norm", "구분", "연도"]), use_container_width=True)
 
-fig3 = px.imshow(
-    pivot,
-    aspect="auto",
-    labels=dict(x="연도", y="재난원인", color="금액"),
-    title="재난원인-연도별 금액 히트맵(값이 큰 해가 진하게 보임)"
-)
-st.plotly_chart(fig3, use_container_width=True)
-
-# -----------------------------
-# Data table + download
-# -----------------------------
-st.subheader("4) 데이터 테이블 & 다운로드")
-
-st.dataframe(dff, use_container_width=True)
-
-csv_bytes = dff.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
 st.download_button(
     "현재 필터 결과 CSV 다운로드",
-    data=csv_bytes,
-    file_name="filtered_natural_disaster_damage.csv",
+    data=df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig"),
+    file_name="filtered_damage.csv",
     mime="text/csv"
 )
